@@ -137,6 +137,7 @@ node_templates:
         storageProfile:
           imageReference: { get_input: ubuntu_image }
           osDisk:
+            name: { concat: [ { get_input: resource_group }, '-osDisk' ] }
             create_option: FromImage
             caching: ReadWrite
             managedDisk:
