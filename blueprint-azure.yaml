@@ -6,6 +6,8 @@ description: >
 imports:
   - https://cloudify.co/spec/cloudify/5.1.0/types.yaml
   - plugin:cloudify-azure-plugin
+  - plugin:cloudify-ansible-plugin
+  - plugin:cloudify-utilities-plugin
 
 inputs:
 
@@ -48,34 +50,32 @@ inputs:
     default: eastus2
 
   resource_group:
-    default: daclp
+    default: daclp-group
 
-  ubuntu_vm_size:
+  webserver_vm_size:
     default: Standard_A1_v2
 
-  ubuntu_image:
+  webserver_vm_image:
     default:
       publisher: Canonical
       offer: UbuntuServer
       sku: 18.04-LTS
       version: latest
 
-  ubuntu_vm_os_family:
+  webserver_vm_os_family:
     default: linux
 
-  ubuntu_vm_os_username:
+  webserver_vm_os_username:
     default: azureuser
-
-  keydata:
-    description: public key content
-
-  public_subnet_cidr:
-    default: 10.10.2.0/24
 
   azure_api_version:
     description: >
       Azure API Version
     default: "2018-04-01"
+
+  ansible_site_yaml_relative_path:
+    type: string
+    default: ansible/nginx/site.yaml
 
 
 dsl_definitions:
@@ -96,6 +96,7 @@ node_templates:
     type: cloudify.azure.nodes.ResourceGroup
     properties:
       client_config: *client_config
+      use_external_resource: true
       name: { get_input: resource_group }
       location: { get_input: location }
 
@@ -103,6 +104,7 @@ node_templates:
     type: cloudify.azure.nodes.network.VirtualNetwork
     properties:
       client_config: *client_config
+      use_external_resource: true
       api_version: { get_input: azure_api_version }
       name: { concat: [ { get_input: resource_group }, '-vnet' ] }
       location: { get_input: location }
@@ -114,47 +116,62 @@ node_templates:
     type: cloudify.azure.nodes.network.Subnet
     properties:
       client_config: *client_config
+      use_external_resource: true
       api_version: { get_input: azure_api_version }
-      name: { concat: [ { get_input: resource_group }, '-vsubnet' ] }
+      name: default
       location: { get_input: location }
-      resource_config:
-        addressPrefix: { get_input: public_subnet_cidr }
     relationships:
     - type: cloudify.azure.relationships.contained_in_virtual_network
       target: network
 
-  ubuntu_vm:
+  agent_key:
+    type: cloudify.keys.nodes.RSAKey
+    properties:
+      resource_config:
+        key_name: cert_key
+        openssh_format: true
+      use_secret_store: true
+      use_secrets_if_exist: true
+    interfaces:
+      cloudify.interfaces.lifecycle:
+        create:
+          implementation: keys.cloudify_ssh_key.operations.create
+          inputs:
+            store_private_key_material: true
+
+  webserver_vm:
     type: cloudify.azure.nodes.compute.VirtualMachine
     properties:
       client_config: *client_config
       api_version: { get_input: azure_api_version }
-      name: { concat: [ { get_input: resource_group }, '-vm' ] }
+      name: webserver
       location: { get_input: location }
-      os_family: { get_input: ubuntu_vm_os_family }
+      os_family: { get_input: webserver_vm_os_family }
       resource_config:
         hardwareProfile:
-          vmSize: { get_input: ubuntu_vm_size }
+          vmSize: { get_input: webserver_vm_size }
         storageProfile:
-          imageReference: { get_input: ubuntu_image }
+          imageReference: { get_input: webserver_vm_image }
           osDisk:
-            name: { concat: [ { get_input: resource_group }, '-osDisk' ] }
+            name: { concat: [ { get_property: [SELF, name] }, '-osDisk' ] }
             create_option: FromImage
             caching: ReadWrite
             managedDisk:
               storageAccountType: Standard_LRS
         osProfile:
           computerName: { get_property: [SELF, name] }
-          adminUsername:  { get_input: ubuntu_vm_os_username }
+          adminUsername:  { get_input: webserver_vm_os_username }
           adminPassword: ''
           linuxConfiguration:
             ssh:
               publicKeys:
-                - path: {concat:[ '/home/', { get_input: ubuntu_vm_os_username }, '/.ssh/authorized_keys' ]}
-                  keyData: { get_input: keydata }
+                - path: {concat:[ '/home/', { get_input: webserver_vm_os_username }, '/.ssh/authorized_keys' ]}
+                  keyData: { get_attribute: [agent_key, public_key_export] }
             disablePasswordAuthentication: true
       agent_config:
-        install_method: none
-        user: { get_input: ubuntu_vm_os_username }
+        install_method: remote
+        user: { get_input: webserver_vm_os_username }
+        key: { get_attribute: [agent_key, private_key_export] }
       storage_endpoint: { get_input: endpoint_storage }
     relationships:
       - type: cloudify.azure.relationships.contained_in_resource_group
@@ -197,6 +214,30 @@ node_templates:
       - type: cloudify.azure.relationships.contained_in_resource_group
         target: resource_group
 
+  ansible_playbook:
+    type: cloudify.nodes.ansible.Playbook
+    properties:
+      playbook_path: { get_input: ansible_site_yaml_relative_path }
+    relationships:
+      - type: cloudify.ansible.relationships.run_on_host
+        target: webserver_vm
+        source_interfaces:
+          cloudify.interfaces.relationship_lifecycle:
+            establish:
+              inputs:
+                sources:
+                  webservers:
+                    hosts:
+                      web:
+                        ansible_host: { get_attribute: [ webserver_vm, ip ] }
+                        ansible_user: { get_input: webserver_vm_os_username }
+                        ansible_ssh_private_key_file: { get_property: [ webserver_vm, agent_config, key ] }
+                        ansible_become: true
+                        ansible_ssh_common_args: -o StrictHostKeyChecking=no
+                options_config:
+                  extra_vars:
+                    domain: cfy-hello
+
 
 capabilities:
 
@@ -206,8 +247,8 @@ capabilities:
   location:
     value: { get_input: location }
 
-  ubuntu_vm_public_ip:
-    value: { get_attribute: [ ubuntu_vm, public_ip ] }
+  webserver_vm_public_ip:
+    value: { get_attribute: [ webserver_vm, public_ip ] }
 
-  ubuntu_vm_private_ip:
-    value: { get_attribute: [ ubuntu_vm, ip ] }
+  webserver_vm_private_ip:
+    value: { get_attribute: [ webserver_vm, ip ] }
