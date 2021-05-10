@@ -152,12 +152,6 @@ node_templates:
           vmSize: { get_input: webserver_vm_size }
         storageProfile:
           imageReference: { get_input: webserver_vm_image }
-          osDisk:
-            name: { concat: [ { get_property: [SELF, name] }, '-osDisk' ] }
-            create_option: FromImage
-            caching: ReadWrite
-            managedDisk:
-              storageAccountType: Standard_LRS
         osProfile:
           computerName: { get_property: [SELF, name] }
           adminUsername:  { get_input: webserver_vm_os_username }
@@ -178,6 +172,20 @@ node_templates:
         target: resource_group
       - type: cloudify.azure.relationships.connected_to_nic
         target: nic
+      - type: cloudify.azure.relationships.connected_to_storage_account
+        target: storage_account
+
+  storage_account:
+    type: cloudify.azure.nodes.storage.StorageAccount
+    properties:
+      name: webserversa01
+      location: { get_input: location }
+      resource_config:
+        accountType: Standard_LRS
+      client_config: *client_config
+    relationships:
+      - type: cloudify.azure.relationships.contained_in_resource_group
+        target: resource_group
 
   nic:
     type: cloudify.azure.nodes.network.NetworkInterfaceCard
